@@ -767,24 +767,6 @@ struct MempoolIdHash {
   }
 };
 
-cudaError_t cudaMallocMaybeCapturing(void** p, size_t size) {
-#if !defined(USE_ROCM) || ROCM_VERSION >= 50300
-  if (at::cuda::currentStreamCaptureStatusMayInitCtx() ==
-      at::cuda::CaptureStatus::None) {
-#endif
-    return C10_CUDA_ERROR_HANDLED(cudaMalloc(p, size));
-#if !defined(USE_ROCM) || ROCM_VERSION >= 50300
-  } else {
-    // It's ok to capture cudaMallocs, as long as we never cudaFree those
-    // addresses before replay.
-    // Capturing cudaMalloc behaves nicely: it gives the graph new VA,
-    // but is ignored (won't leakily allocate new memory) in replays.
-    at::cuda::CUDAStreamCaptureModeGuard g{cudaStreamCaptureModeRelaxed};
-    return C10_CUDA_ERROR_HANDLED(cudaMalloc(p, size));
-  }
-#endif
-}
-
 } // anonymous namespace
 } // namespace Native
 
@@ -841,6 +823,36 @@ static std::string reportProcessMemoryInfo(int device) {
 }
 
 namespace Native {
+
+namespace {
+
+cudaError_t cudaMallocMaybeUsingUvm(void** p, size_t size) {
+  if (CUDAAllocatorConfig::use_uvm()) {
+    return cudaMallocManaged(p, size);
+  } else {
+    return cudaMalloc(p, size);
+  }
+}
+
+cudaError_t cudaMallocMaybeCapturing(void** p, size_t size) {
+#if !defined(USE_ROCM) || ROCM_VERSION >= 50300
+  if (at::cuda::currentStreamCaptureStatusMayInitCtx() ==
+      at::cuda::CaptureStatus::None) {
+#endif
+    return C10_CUDA_ERROR_HANDLED(cudaMallocMaybeUsingUvm(p, size));
+#if !defined(USE_ROCM) || ROCM_VERSION >= 50300
+  } else {
+    // It's ok to capture cudaMallocs, as long as we never cudaFree those
+    // addresses before replay.
+    // Capturing cudaMalloc behaves nicely: it gives the graph new VA,
+    // but is ignored (won't leakily allocate new memory) in replays.
+    at::cuda::CUDAStreamCaptureModeGuard g{cudaStreamCaptureModeRelaxed};
+    return C10_CUDA_ERROR_HANDLED(cudaMallocMaybeUsingUvm(p, size));
+  }
+#endif
+}
+
+} // namespace
 
 class DeviceCachingAllocator {
  private:
@@ -1021,6 +1033,35 @@ class DeviceCachingAllocator {
               CUDAAllocatorConfig::garbage_collection_threshold() > 0.0)) {
         garbage_collect_cached_blocks();
       }
+
+      // Usually we only trigger memory reclaimation on allocation failure.
+      // However, if UVM is in use, we never get allocation failure from CUDA,
+      // so we have to free memory proactively.
+      if (CUDAAllocatorConfig::use_uvm()) {
+        [[maybe_unused]] size_t device_free = 0;
+        size_t device_total = 0;
+        C10_CUDA_CHECK(cudaMemGetInfo(&device_free, &device_total));
+
+        auto allocated_bytes =
+            stats.allocated_bytes[static_cast<size_t>(StatType::AGGREGATE)]
+                .current;
+        auto reserved_bytes =
+            stats.reserved_bytes[static_cast<size_t>(StatType::AGGREGATE)]
+                .current;
+        // We only proactively reclaim memory if we've used up all device
+        // memories. This is consistent with the default behavior when UVM is
+        // not used.
+        if (reserved_bytes > static_cast<int64_t>(device_total) &&
+            // Try reclaiming via the lighter way first, and if it fails..
+            !release_available_cached_blocks(params) &&
+            // ... try the harder way. Here we allow a maximum of 1.33x
+            // over-subscription before doing the "hard" reclaimation.
+            reserved_bytes > allocated_bytes * 4 / 3 &&
+            C10_LIKELY(captures_underway == 0)) {
+          release_cached_blocks(context);
+        }
+      }
+
       // Attempt allocate
       // WARNING: alloc_block may release the allocator lock when calling
       // cudaMalloc. So far this function has not modified allocator state, but
@@ -3005,7 +3046,7 @@ class NativeCachingAllocator : public CUDAAllocator {
 
       // Deliberately don't use cudaMallocMaybeCapturing here, to force an error
       // if someone tries to use forceUncachedAllocator while capturing.
-      C10_CUDA_CHECK(cudaMalloc(&devPtr, size));
+      C10_CUDA_CHECK(cudaMallocMaybeUsingUvm(&devPtr, size));
       const c10::impl::PyInterpreter* interp = c10::impl::GPUTrace::get_trace();
       if (C10_UNLIKELY(interp)) {
         (*interp)->trace_gpu_memory_allocation(
