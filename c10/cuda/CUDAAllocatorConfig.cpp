@@ -15,6 +15,7 @@ CUDAAllocatorConfig::CUDAAllocatorConfig()
       m_garbage_collection_threshold(0),
       m_pinned_num_register_threads(1),
       m_expandable_segments(false),
+      m_use_uvm(false),
       m_release_lock_on_cudamalloc(false),
       m_pinned_use_cuda_host_register(false) {
   m_roundup_power2_divisions.assign(kRoundUpPowerOfTwoIntervals, 0);
@@ -267,6 +268,14 @@ void CUDAAllocatorConfig::parseArgs(const char* env) {
           i < config.size() && (config[i] == "True" || config[i] == "False"),
           "Expected a single True/False argument for expandable_segments");
       m_expandable_segments = (config[i] == "True");
+    } else if (config[i] == "use_uvm") {
+      used_native_specific_option = true;
+      consumeToken(config, ++i, ':');
+      ++i;
+      TORCH_CHECK(
+          i < config.size() && (config[i] == "True" || config[i] == "False"),
+          "Expected a single True/False argument for use_uvm");
+      m_use_uvm = (config[i] == "True");
     } else if (
         // ROCm build's hipify step will change "cuda" to "hip", but for ease of
         // use, accept both. We must break up the string to prevent hipify here.

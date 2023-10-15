@@ -35,6 +35,10 @@ class C10_CUDA_API CUDAAllocatorConfig {
 #endif
   }
 
+  static bool use_uvm() {
+    return instance().m_use_uvm;
+  }
+
   static bool release_lock_on_cudamalloc() {
     return instance().m_release_lock_on_cudamalloc;
   }
@@ -104,6 +108,7 @@ class C10_CUDA_API CUDAAllocatorConfig {
   std::atomic<double> m_garbage_collection_threshold;
   std::atomic<size_t> m_pinned_num_register_threads;
   std::atomic<bool> m_expandable_segments;
+  std::atomic<bool> m_use_uvm;
   std::atomic<bool> m_release_lock_on_cudamalloc;
   std::atomic<bool> m_pinned_use_cuda_host_register;
 };

@@ -482,6 +482,9 @@ Available options:
   using more threads to parallelize the page mapping operations to reduce the overall
   allocation time of pinned memory. A good value for this option is 8 based on
   benchmarking results.
+* ``use_uvm`` enables CUDA Unified Memory when set to ``True``. Using CUDA Unified
+  Memory reduces OOM possibility, but may slow down the training. We advise you
+  profile before enabling it.
 
 .. note::
 
